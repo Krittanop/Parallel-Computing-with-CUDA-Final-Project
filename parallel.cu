@@ -6,101 +6,36 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
-
-__global__ void horizontal_integral(unsigned char *input, long *output, int width, int height, int C, int channel) {
-  extern __shared__ long arr[];
-
-  int y = blockIdx.x;
-  if (y >= height) return;
-
-  int tid = threadIdx.x;
-  int i = tid;
-
-
-  // Load input into shared memory
-  if (i < width) {
-    int idx = (y * width + i) * C + channel;
-    arr[tid] = input[idx];
-  } else {
-    arr[tid] = 0;
-  }
-  __syncthreads();
-
-  for (int stride = 1; stride < blockDim.x; stride *= 2) {
-    int index = (tid + 1) * stride * 2 - 1;
-    if (index < blockDim.x) {
-      arr[index] += arr[index - stride];
-    }
-    __syncthreads();
-  }
-
-  if (tid == 0) arr[blockDim.x - 1] = 0;
-  __syncthreads();
-
-  for (int stride = blockDim.x / 2; stride > 0; stride /= 2) {
-    int index = (tid + 1) * stride * 2 - 1;
-    if (index < blockDim.x) {
-      long t = arr[index - stride];
-      arr[index - stride] = arr[index];
-      arr[index] += t;
-    }
-    __syncthreads();
-  }
-
-  if (i < width) {
-    long value = arr[tid];
-    // convert exclusive -> inclusive prefix: add original element
-    value += input[(y * width + i) * C + channel];
-    output[y * width + i] = value;
+// Sequential scan per row (one thread per row)
+__global__ void horizontal_integral(unsigned char *input, long long *output, int width, int height, int C, int channel) {
+  int row = blockIdx.x * blockDim.x + threadIdx.x;
+  
+  if (row >= height) return;
+  
+  // Each thread processes one complete row sequentially
+  long long sum = 0;
+  for (int col = 0; col < width; col++) {
+    int idx = (row * width + col) * C + channel;
+    sum += input[idx];
+    output[row * width + col] = sum;
   }
 }
 
-
-__global__ void vertical_integral(long *input, long *output, int width, int height) {
-  extern __shared__ long arr[];
-
-  int x = blockIdx.x;
-  if (x >= width) return;
-
-  int tid = threadIdx.x;
-  int y = tid;
-
-  if (y < height) {
-    arr[tid] = input[y * width + x];
-  } else {
-    arr[tid] = 0;
-  }
-  __syncthreads();
-
-  for (int stride = 1; stride < blockDim.x; stride *= 2) {
-    int index = (tid + 1) * stride * 2 - 1;
-    if (index < blockDim.x) {
-      arr[index] += arr[index - stride];
-    }
-    __syncthreads();
-  }
-
-  if (tid == 0) arr[blockDim.x - 1] = 0;
-  __syncthreads();
-
-  for (int stride = blockDim.x / 2; stride > 0; stride /= 2) {
-    int index = (tid + 1) * stride * 2 - 1;
-    if (index < blockDim.x) {
-      long t = arr[index - stride];
-      arr[index - stride] = arr[index];
-      arr[index] += t;
-    }
-    __syncthreads();
-  }
-
-  if (y < height) {
-    long value = arr[tid] + input[y * width + x];
-    output[y * width + x] = value;
+// Sequential scan per column (one thread per column)
+__global__ void vertical_integral(long long *input, long long *output, int width, int height) {
+  int col = blockIdx.x * blockDim.x + threadIdx.x;
+  
+  if (col >= width) return;
+  
+  // Each thread processes one complete column sequentially
+  long long sum = 0;
+  for (int row = 0; row < height; row++) {
+    sum += input[row * width + col];
+    output[row * width + col] = sum;
   }
 }
 
-
-__global__ void blur_from_integral(long **S_device, unsigned char *output, int width, int height, int channel, int r) {
+__global__ void blur_from_integral(long long **S_device, unsigned char *output, int width, int height, int channel, int r) {
   int x = blockIdx.x * blockDim.x + threadIdx.x;
   int y = blockIdx.y * blockDim.y + threadIdx.y;
   
@@ -112,20 +47,11 @@ __global__ void blur_from_integral(long **S_device, unsigned char *output, int w
   int y2 = min(height - 1, y + r);
   
   int area = (x2 - x1 + 1) * (y2 - y1 + 1);
-  float inv_area = 1.0f / area;
-  
-  // Pre-compute indices (if all channels use same integral image layout)
-  int idx_tl = (y1 - 1) * width + (x1 - 1);  // top-left
-  int idx_tr = (y1 - 1) * width + x2;        // top-right
-  int idx_bl = y2 * width + (x1 - 1);        // bottom-left
-  int idx_br = y2 * width + x2;              // bottom-right
-  
-  int out_base = (y * width + x) * channel;
   
   for (int c = 0; c < channel; c++) {
-    long *S = S_device[c];
+    long long *S = S_device[c];
 
-    long sum = S[y2 * width + x2];
+    long long sum = S[y2 * width + x2];
     if (x1 > 0) sum -= S[y2 * width + (x1 - 1)];
     if (y1 > 0) sum -= S[(y1 - 1) * width + x2];
     if (x1 > 0 && y1 > 0) sum += S[(y1 - 1) * width + (x1 - 1)];
@@ -143,45 +69,44 @@ void blur_image(unsigned char *in_image, unsigned char *out_image, int width, in
   cudaMalloc(&din_image, width * height * channel * sizeof(unsigned char));
   cudaMalloc(&dout_image, width * height * channel * sizeof(unsigned char));
 
-  long **d_s = (long **)malloc(channel * sizeof(long *));
-  long **h_S_ptrs = (long **)malloc(channel * sizeof(long *));
-  long **d_S_ptrs;
-  long *d_temp;
+  long long **d_s = (long long **)malloc(channel * sizeof(long long *));
+  long long **h_S_ptrs = (long long **)malloc(channel * sizeof(long long *));
+  long long **d_S_ptrs;
+  long long *d_temp;
 
-  cudaMalloc(&d_temp, width * height * sizeof(long));
-  cudaMalloc(&d_S_ptrs, channel * sizeof(long *));
+  cudaMalloc(&d_temp, width * height * sizeof(long long));
+  cudaMalloc(&d_S_ptrs, channel * sizeof(long long *));
 
   for (int c = 0; c < channel; c++) {
-    cudaMalloc(&d_s[c], width * height * sizeof(long));
+    cudaMalloc(&d_s[c], width * height * sizeof(long long));
     h_S_ptrs[c] = d_s[c];
   }
 
   cudaMemcpy(din_image, in_image, width * height * channel * sizeof(unsigned char), cudaMemcpyHostToDevice);
-  cudaMemcpy(d_S_ptrs, h_S_ptrs, channel * sizeof(long *), cudaMemcpyHostToDevice);
+  cudaMemcpy(d_S_ptrs, h_S_ptrs, channel * sizeof(long long *), cudaMemcpyHostToDevice);
 
-  int blockSizeH = 1;
-  while (blockSizeH < width) blockSizeH <<= 1;
-  if (blockSizeH > 1024) blockSizeH = 1024; // if width>1024 you'll need chunking / multi-block scan
-  dim3 gridH(height);
-  size_t sharedBytesH = blockSizeH * sizeof(long);
+  // Grid configuration: one thread per row for horizontal scan
+  int threadsPerBlockH = (height <= 1024) ? height : 1024;
+  int numBlocksH = (height + threadsPerBlockH - 1) / threadsPerBlockH;
 
-  // vertical: one block per column, blockDim.x must be >= height
-  int blockSizeV = 1;
-  while (blockSizeV < height) blockSizeV <<= 1;
-  if (blockSizeV > 1024) blockSizeV = 1024; // if height>1024 you'll need chunking / multi-block scan
-  dim3 gridV(width);
-  size_t sharedBytesV = blockSizeV * sizeof(long);
+  // Grid configuration: one thread per column for vertical scan
+  int threadsPerBlockV = (width <= 1024) ? width : 1024;
+  int numBlocksV = (width + threadsPerBlockV - 1) / threadsPerBlockV;
 
-  // Compute integral for 3 channels
+  // Compute integral for all channels
   for (int c = 0; c < channel; c++) {
-    horizontal_integral<<<gridH, blockSizeH, sharedBytesH>>>(din_image, d_temp, width, height, channel, c);
-    vertical_integral<<<gridV, blockSizeV, sharedBytesV>>>(d_temp, d_s[c], width, height);
+    horizontal_integral<<<numBlocksH, threadsPerBlockH>>>(din_image, d_temp, width, height, channel, c);
+    cudaDeviceSynchronize();
+    vertical_integral<<<numBlocksV, threadsPerBlockV>>>(d_temp, d_s[c], width, height);
+    cudaDeviceSynchronize();
   }
 
   int r = (kernel - 1) / 2;
   dim3 threadsPerBlock(16, 16);
   dim3 numBlocks((width + threadsPerBlock.x - 1) / threadsPerBlock.x, (height + threadsPerBlock.y - 1) / threadsPerBlock.y);
   blur_from_integral<<<numBlocks, threadsPerBlock>>>(d_S_ptrs, dout_image, width, height, channel, r);
+  cudaDeviceSynchronize();
+  
   cudaMemcpy(out_image, dout_image, width * height * channel * sizeof(unsigned char), cudaMemcpyDeviceToHost);
     
   // Free device memory
