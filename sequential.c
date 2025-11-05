@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <time.h>
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -11,35 +12,34 @@
 void blurImageRGB(unsigned char *in_image, unsigned char *out_image, int width, int height, int channel, int kernel) {
 	int r = (kernel - 1) / 2;
 
-	// Allocate integral image (channel channels)
-	long ***integral_img_arr = (long ***)malloc(channel * sizeof(long **));
-	for (int c = 0; c < channel; c++) {
-		integral_img_arr[c] = (long **)malloc(height * sizeof(long *));
-		for (int y = 0; y < height; y++)
-			integral_img_arr[c][y] = (long *)calloc(width, sizeof(long));
-	}
+	int integral_img_size = (int)width * height;
+	int total_elements = integral_img_size * channel;
+	long *integral_img = (long *)calloc(total_elements, sizeof(long));
 
 	// Step 1: Build integral images
 	for (int c = 0; c < channel; c++) {
+		int channel_offset = integral_img_size * c;
+		
 		for (int y = 0; y < height; y++) {
 			long rowSum = 0;
+			int row_offset = channel_offset + (int)y * width;
+			
 			for (int x = 0; x < width; x++) {
-				int idx = (y * width + x) * channel + c;
-				rowSum += in_image[idx];
-				if (y == 0)
-					integral_img_arr[c][y][x] = rowSum;
-				else
-					integral_img_arr[c][y][x] = integral_img_arr[c][y - 1][x] + rowSum;
+				int idx_in = (y * width + x) * channel + c;
+				rowSum += in_image[idx_in];
+
+				int idx_ii = row_offset + x;
+				
+				if (y == 0) {
+					integral_img[idx_ii] = rowSum;
+				} else {
+					int idx_ii_prev_row = idx_ii - width;
+					integral_img[idx_ii] = integral_img[idx_ii_prev_row] + rowSum;
+				}
 			}
 		}
 	}
 
-
-	// Validate integral image
-	printf("Integral image sums (bottom-right corner):\n");
-	for (int c = 0; c < channel; c++) {
-		printf("Channel %d: %ld\n", c, integral_img_arr[c][height-1][width-1]);
-	}
 
 	// Step 2: Compute blurred image
 	for (int y = 0; y < height; y++) {
@@ -49,35 +49,32 @@ void blurImageRGB(unsigned char *in_image, unsigned char *out_image, int width, 
 			int x2 = MIN(width - 1, x + r);
 			int y2 = MIN(height - 1, y + r);
 			int area = (x2 - x1 + 1) * (y2 - y1 + 1);
+			
+			int idx_out_base = ((int)y * width + x) * channel;
 
 			for (int c = 0; c < channel; c++) {
-				long sum = integral_img_arr[c][y2][x2];
-				if (x1 > 0) sum -= integral_img_arr[c][y2][x1 - 1];
-				if (y1 > 0) sum -= integral_img_arr[c][y1 - 1][x2];
-				if (x1 > 0 && y1 > 0) sum += integral_img_arr[c][y1 - 1][x1 - 1];
+				int channel_offset = integral_img_size * c;
+				long sum = integral_img[channel_offset + (int)y2 * width + x2];
+				if (x1 > 0) sum -= integral_img[channel_offset + (int)y2 * width + (x1 - 1)];
 
-				int idx = (y * width + x) * channel + c;
-				out_image[idx] = (unsigned char)(sum / area);
+				if (y1 > 0) sum -= integral_img[channel_offset + (int)(y1 - 1) * width + x2];
+
+				if (x1 > 0 && y1 > 0) sum += integral_img[channel_offset + (int)(y1 - 1) * width + (x1 - 1)];
+
+				out_image[idx_out_base + c] = (unsigned char)(sum / area);
 			}
 		}
 	}
-
-	// Free memory
-	for (int c = 0; c < channel; c++) {
-		for (int y = 0; y < height; y++)
-			free(integral_img_arr[c][y]);
-		free(integral_img_arr[c]);
-	}
-	free(integral_img_arr);
+	free(integral_img);
 }
 
 int main() {
 	// Input and Output file name
 	const char *input_path = "input.png";
-	const char *output_path = "blurred_output.png";
+	const char *output_path = "blurred.png";
 
 	// kernel size
-	int kernel = 15;  
+	int kernel = 30;
 
 	// Read an input image
 	int width, height, channel;
@@ -91,17 +88,13 @@ int main() {
 
 	printf("Image loaded: %dx%d (%d channels)\n", width, height, channel);
 
-	// Print first pixel
-	int x = 0, y = 0;
-	int idx = (y * width + x) * channel;
-	printf("Pixel at (%d,%d): ", x, y);
-	for (int c = 0; c < channel; c++) {
-		printf("%d ", in_image[idx + c]);
-	}
-	printf("\n");
-
 	// Allocate output image array
-	unsigned char *out_image = (unsigned char *)malloc(width * height * channel);
+	unsigned char *out_image = (unsigned char *)malloc((size_t)width * height * channel);
+	if (!out_image) {
+		printf("Error: Failed to allocate memory for output image.\n");
+		stbi_image_free(in_image);
+		return -1;
+	}
 
 	// Compute blur image with timer
 	clock_t start = clock();

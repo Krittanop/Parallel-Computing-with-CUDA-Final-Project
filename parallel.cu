@@ -85,11 +85,9 @@ void blur_image(unsigned char *in_image, unsigned char *out_image, int width, in
   cudaMemcpy(din_image, in_image, width * height * channel * sizeof(unsigned char), cudaMemcpyHostToDevice);
   cudaMemcpy(d_S_ptrs, h_S_ptrs, channel * sizeof(long long *), cudaMemcpyHostToDevice);
 
-  // Grid configuration: one thread per row for horizontal scan
   int threadsPerBlockH = (height <= 1024) ? height : 1024;
   int numBlocksH = (height + threadsPerBlockH - 1) / threadsPerBlockH;
 
-  // Grid configuration: one thread per column for vertical scan
   int threadsPerBlockV = (width <= 1024) ? width : 1024;
   int numBlocksV = (width + threadsPerBlockV - 1) / threadsPerBlockV;
 
@@ -128,7 +126,7 @@ int main() {
 	const char *output_path = "blurred_output.png";
 
 	// kernel size
-	int kernel = 15;  
+	int kernel = 30;  
 
 	// Read an input image
 	int width, height, channel;
