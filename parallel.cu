@@ -1,6 +1,6 @@
 #include <stdio.h>
 #include <cuda.h>
-#include <cuda_runtime.h>
+#include <time.h>
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -144,15 +144,15 @@ int main() {
 
   unsigned char *out_image = (unsigned char *)malloc((size_t)width * height * channel * sizeof(unsigned char));
 
-  cudaEvent_t start, stop;
-  cudaEventCreate(&start);
-  cudaEventCreate(&stop);
 
   // Compute blur image
-  cudaEventRecord(start);
+  clock_t start = clock();
   blur_image(in_image, out_image, width, height, channel, kernel);
-  cudaEventRecord(stop);
-  
+  clock_t end = clock();
+
+  double elapsed = (double)(end - start) / CLOCKS_PER_SEC;
+	printf("Blurring done in %.4f seconds (kernel=%d)\n", elapsed, kernel);
+
   stbi_write_png(output_path, width, height, channel, out_image, width * channel);
   stbi_image_free(in_image);
   free(out_image);
